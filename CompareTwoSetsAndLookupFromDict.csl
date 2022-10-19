@@ -1,0 +1,86 @@
+// While there might be another way of achieving this that's wooshed me by - this works for the use-case. 
+// THE ISSUE
+//==
+// Checking if x has all of y
+// where x has_all (y)
+// Scalar error whatever :/
+//==
+// THE "FIX"
+// ==
+// Checking if x has all of y
+//x= [a,b,c,d]
+// length = 4
+//y = [a,b,c]
+// length = 3
+// difference == 1
+// set_diffrence(x,y) = ['d']
+// length = 1
+// MATCH!
+//--
+// Checking if x has all of y
+//x= [a,b,c,d]
+// length = 4
+//y = [a,b, x]
+// length = 3
+// difference == 1
+// set_diffrence(x,y) = ['c','x']
+// length = 2
+// NO MATCH :(
+// ==
+// Array of maps - the set index could be used if you ensure the order is correct otherwise the lookup keys can be used
+// to either define the value or use a different value
+let tiers_mapping = dynamic(
+    [
+        {"set": ["AA","BB", "CC"], "tier1": "AA", "tier2": "BB", "tier3": "CC"},
+        {"set": ["AA","XX"], "tier1": "AA", 'tier2': 'XX'},
+        {"set": ['NN','OHOH', 'NONO'], "tier1": "OH", "tier2": "PLEASE_NO", "tier3": "NOT_LIKE_THIS"}
+    ]
+);
+// Fake table
+let T = datatable(EntityID:string, EntityExtraInfo:string, ListOfALLValuesEntityHas:dynamic ) [
+  "ID1","EPIC ENTITY", dynamic(["AA", "XX"]), 
+  "ID2", "SUPER EPIC ENTITY, dynamic(['AA','BB', "CC", "XX"])
+];
+T
+// Add map to table to use in mv-apply
+| extend map = tiers_mapping
+// mv-apply sort of "loops" through each row in map
+| mv-apply map on ( 
+    // example we are in "set": ["AA","BB", "CC"] from tiers_mapping (the first example row in map)
+    // Get the length of the set and then the length of all host tags and subtract the map length from host tags 
+    // e.g if the host has 10 tags and the set as 3 we get 7
+     extend diff_length = array_length(c) - array_length(map["set"])
+     // set_difference returns a set of all the values from two sets that are UNIQUE so comparing [a,b,c] with [a,b] would return [c]
+     // Because we got weird scalar issues, the set difference for a matching set should have a number of records equal to the 
+     // size of the host tags list and the size of the maps tags list
+    | extend tier1 = case(
+    // the count of returned records from set_difference using array_length
+    array_length( 
+            set_difference( 
+                // Difference between ListOfALLValuesEntityHas
+                ListOfALLValuesEntityHas, 
+                // and the set
+                (map["set"]))
+            ) 
+            // If the length is equal to the diff_length as described earlier select the value of key "tier1" from the map otherwise return unknown
+            == diff_length, map["tier1"], 'UNKNOWN'
+    )
+    |    extend tier2 = case(
+    array_length( set_difference( ListOfALLValuesEntityHas, (map["set"]))) == diff_length, map["tier2"], '')
+    |    extend tier3 = case(
+    array_length( set_difference( ListOfALLValuesEntityHas, (map["set"]))) == diff_length, map["tier3"], '')
+    // Filter out rows with no tier1 as we won't ever need to group by nothing
+    | where isnotempty( tier1)
+    // Because we want to collapse to only unique fully complete rows, we create a "set" of the values by tier1 and the unique entity (in this case b which is a number)
+    // make_set selects unique values for each grouping. As make_set should create an array of all the level2 and level3 values and there will be an empty row for each level
+    // e.g 
+    // 1 AA, EMPTY EMPTY
+    // 1 AA, BB, EMPTY
+    // 1 WS, BB, CC
+    // And we want to remove the duplicate rows with empty values, doing make_set creates an array of ONLY the non-empty values so we select array level [0]
+    // which will be the value from the map
+    | summarize LEVEL2 = make_set(tier2)[0], LEVEL3 = make_set(tier3)[0] by EntityID, tier1
+    // As with the filtering out of empty values, we shouldn't ever need an "UNKNOWN" tier1 (although if unknown is desired leave this in)
+    | where tier1 != 'UNKNOWN'
+)
+| project-away map
